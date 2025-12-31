@@ -41,197 +41,212 @@ class PaystackPayNow extends StatefulWidget {
 }
 
 class _PaystackPayNowState extends State<PaystackPayNow> {
+  late final WebViewController _controller;
+  bool _isLoading = true;
+  String? _errorMessage;
+  PaystackRequestResponse? _response;
+
+  @override
+  void initState() {
+    super.initState();
+    _makePaymentRequest();
+  }
+
   /// Makes HTTP Request to Paystack for access to make payment.
-  Future<PaystackRequestResponse> _makePaymentRequest() async {
-    http.Response? response;
-    final amount = widget.amount * 100;
+  Future<void> _makePaymentRequest() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
 
     try {
-      // We'll create a modified metadata object with cancel_action.
-      // This implementation below allows the user to be able to Cancel Payment
-      // directly from the Paystack Webview.
+      final amount = widget.amount * 100;
       Map<String, dynamic> enrichedMetadata;
 
-      // Here, we check if metadata is already a Map,
-      // we create one if it's null, or convert if needed
       if (widget.metadata == null) {
         enrichedMetadata = {
           "cancel_action": "https://github.com/popekabu/pay_with_paystack"
         };
       } else if (widget.metadata is Map) {
-        // We clone the existing metadata and add the new field
         enrichedMetadata = Map<String, dynamic>.from(widget.metadata);
         enrichedMetadata["cancel_action"] =
             "https://github.com/popekabu/pay_with_paystack";
       } else {
-        // If metadata is not a Map, convert it to a string representation
-        // and include it as part of the metadata
         enrichedMetadata = {
           "data": widget.metadata.toString(),
           "cancel_action": "https://github.com/popekabu/pay_with_paystack"
         };
       }
 
-      /// Sending Data to paystack.
-      response = await http.post(
-        /// Url to send data to
+      final response = await http.post(
         Uri.parse('https://api.paystack.co/transaction/initialize'),
         headers: {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer ${widget.secretKey}',
         },
-
-        /// Data to send to the URL with enriched metadata(with cancel_action).
         body: jsonEncode({
           "email": widget.email,
           "amount": amount.toString(),
           "reference": widget.reference,
           "currency": widget.currency,
           "plan": widget.plan,
-          "metadata": enrichedMetadata, // We use the enriched metadata here
+          "metadata": enrichedMetadata,
           "callback_url": widget.callbackUrl,
           "channels": widget.paymentChannel
         }),
       );
-    } on Exception catch (e) {
-      /// In the event of an exception, take the user back and show a SnackBar error.
-      if (context.mounted) {
-        Navigator.pop(context);
-        ScaffoldMessenger.of(context).hideCurrentSnackBar();
-        var snackBar =
-            SnackBar(content: Text("Fatal error occurred, ${e.toString()}"));
-        ScaffoldMessenger.of(context).showSnackBar(snackBar);
-      }
-    }
 
-    if (response!.statusCode == 200) {
-      return PaystackRequestResponse.fromJson(jsonDecode(response.body));
-    } else {
-      throw Exception(
-          "Response Code: ${response.statusCode}, Response Body${response.body}");
+      if (response.statusCode == 200) {
+        final decodedResponse =
+            PaystackRequestResponse.fromJson(jsonDecode(response.body));
+
+        final authUrl = decodedResponse.authUrl;
+        final reference = decodedResponse.reference;
+
+        if (decodedResponse.status == true &&
+            authUrl != null &&
+            reference != null) {
+          _initializeWebViewController(authUrl, reference);
+          if (mounted) {
+            setState(() {
+              _response = decodedResponse;
+              _isLoading = false;
+            });
+          }
+        } else {
+          throw Exception(
+              "Payment initialization failed: ${decodedResponse.message ?? 'Unknown error'}");
+        }
+      } else {
+        throw Exception(
+            "Response Code: ${response.statusCode}, Body: ${response.body}");
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _errorMessage = e.toString();
+        });
+      }
     }
   }
 
+  void _initializeWebViewController(String authUrl, String reference) {
+    _controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onNavigationRequest: (request) async {
+            final url = request.url;
+            if (url == 'https://github.com/popekabu/pay_with_paystack' ||
+                url == 'https://standard.paystack.co/close' ||
+                url == 'https://paystack.co/close' ||
+                url.contains(widget.callbackUrl)) {
+              await _checkTransactionStatus(reference);
+              if (mounted) {
+                Navigator.of(context).pop();
+              }
+              return NavigationDecision.prevent;
+            }
+            return NavigationDecision.navigate;
+          },
+        ),
+      )
+      ..loadRequest(Uri.parse(authUrl));
+  }
+
   /// Checks for transaction status of current transaction before view closes.
-  Future _checkTransactionStatus(String ref) async {
-    http.Response? response;
+  Future<void> _checkTransactionStatus(String ref) async {
     try {
-      /// Getting data, passing [ref] as a value to the URL that is being requested.
-      response = await http.get(
+      final response = await http.get(
         Uri.parse('https://api.paystack.co/transaction/verify/$ref'),
         headers: {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer ${widget.secretKey}',
         },
       );
-    } on Exception catch (_) {
-      /// In the event of an exception, take the user back and show a SnackBar error.
-      if (context.mounted) {
-        Navigator.pop(context);
-        ScaffoldMessenger.of(context).hideCurrentSnackBar();
-        var snackBar = const SnackBar(
-            content: Text("Fatal error occurred, Please check your internet"));
-        ScaffoldMessenger.of(context).showSnackBar(snackBar);
+
+      if (response.statusCode == 200) {
+        var decodedRespBody = jsonDecode(response.body);
+        if (decodedRespBody["data"]["status"] == "success") {
+          final data = PaymentData.fromJson(decodedRespBody["data"]);
+          widget.transactionCompleted(data);
+        } else {
+          widget.transactionNotCompleted(
+              decodedRespBody["data"]["status"].toString());
+        }
       }
-    }
-    if (response!.statusCode == 200) {
-      var decodedRespBody = jsonDecode(response.body);
-      // print(decodedRespBody.toString());
-      if (decodedRespBody["data"]["status"] == "success") {
-        final data = PaymentData.fromJson(decodedRespBody["data"]);
-        widget.transactionCompleted(data);
-      } else {
-        widget.transactionNotCompleted(
-            decodedRespBody["data"]["status"].toString());
-      }
-    } else {
-      /// Anything else means there is an issue
-      throw Exception(
-          "Response Code: ${response.statusCode}, Response Body${response.body}");
+    } catch (_) {
+      // Silent failure on check, just close or let user verify manually if needed
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    // Only block pop if we are in the middle of a transaction (loading or webview active)
+    // If there is an error, we should allow popping to exit.
+    final canPop = _errorMessage != null;
+
     return PopScope(
-      canPop: false, // Prevent back gesture
-      child: FutureBuilder<PaystackRequestResponse>(
-          future: _makePaymentRequest(),
-          builder: (context, snapshot) {
-            if (snapshot.hasData && snapshot.data!.status == true) {
-              final controller = WebViewController()
-                ..setJavaScriptMode(JavaScriptMode.unrestricted)
-                // ..setUserAgent("Flutter;Webview")
-                ..setNavigationDelegate(
-                  NavigationDelegate(
-                    onNavigationRequest: (request) async {
-                      final url = request.url;
-
-                      switch (url) {
-                        case 'https://your-cancel-url.com':
-                        case 'https://cancelurl.com':
-                        case 'https://standard.paystack.co/close':
-                        case 'https://paystack.co/close':
-                        case 'https://github.com/popekabu/pay_with_paystack':
-                          await _checkTransactionStatus(
-                                  snapshot.data!.reference)
-                              .then((value) {
-                            Navigator.of(context).pop();
-                          });
-                          break;
-
-                        default:
-                          if (url.contains(widget.callbackUrl)) {
-                            await _checkTransactionStatus(
-                                    snapshot.data!.reference)
-                                .then((value) {
-                              Navigator.of(context).pop();
-                            });
-                          }
-                          break;
-                      }
-
-                      return NavigationDecision.navigate;
-                    },
-                  ),
-                )
-                ..loadRequest(Uri.parse(snapshot.data!.authUrl));
-              return Scaffold(
-                // appBar: AppBar(
-                //   automaticallyImplyLeading: false,
-                //   //TODO -> Now that the Cancel Payment works, you can remove this cancel icon.
-                //   actions: [
-                //     InkWell(
-                //         onTap: () async {
-                //           await _checkTransactionStatus(
-                //                   snapshot.data!.reference)
-                //               .then((value) {
-                //             Navigator.of(context).pop();
-                //           });
-                //         },
-                //         child: const Icon(Icons.close)),
-                //   ],
-                // ),
-                body: WebViewWidget(
-                  controller: controller,
-                ),
-              );
-            }
-
-            if (snapshot.hasError) {
-              return Material(
-                child: Center(
-                  child: Text('${snapshot.error}'),
-                ),
-              );
-            }
-
-            return const Material(
-              child: Center(
-                child: CircularProgressIndicator(),
-              ),
-            );
-          }),
+      canPop: canPop,
+      onPopInvoked: (didPop) {
+        if (!didPop && _errorMessage == null) {
+          // Show exit confirmation or just ignore
+        }
+      },
+      child: Scaffold(
+        body: SafeArea(
+          child: _buildBody(),
+        ),
+      ),
     );
+  }
+
+  Widget _buildBody() {
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_errorMessage != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(20.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.error_outline, color: Colors.red, size: 50),
+              const SizedBox(height: 10),
+              Text(
+                "Failed to initialize payment",
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 5),
+              Text(
+                _errorMessage!,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 20),
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.of(context).pop();
+                },
+                child: const Text("Close"),
+              ),
+              TextButton(
+                onPressed: _makePaymentRequest,
+                child: const Text("Retry"),
+              )
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (_response != null) {
+      return WebViewWidget(controller: _controller);
+    }
+
+    return const SizedBox.shrink();
   }
 }

@@ -1,22 +1,22 @@
 class PaystackRequestResponse {
   final bool status;
-  final String authUrl;
-  final String reference;
-  // final PaymentData? data;
+  final String? authUrl;
+  final String? reference;
+  final String? message;
 
   const PaystackRequestResponse({
-    required this.authUrl,
+    this.authUrl,
     required this.status,
-    required this.reference,
-    // this.data,
+    this.reference,
+    this.message,
   });
 
   factory PaystackRequestResponse.fromJson(Map<String, dynamic> json) {
     return PaystackRequestResponse(
-      status: json['status'],
-      authUrl: json['data']["authorization_url"],
-      reference: json['data']["reference"],
-      // data: json['data'] != null ? PaymentData.fromJson(json["data"]) : null,
+      status: json['status'] is bool ? json['status'] : false,
+      authUrl: json['data'] != null ? json['data']["authorization_url"] : null,
+      reference: json['data'] != null ? json['data']["reference"] : null,
+      message: json['message'],
     );
   }
 }
